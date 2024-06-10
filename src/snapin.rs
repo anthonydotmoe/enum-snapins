@@ -1,7 +1,9 @@
-use std::{error::Error, path::PathBuf, str::FromStr};
+use std::{error::Error, str::FromStr};
 
 use registry::{self as reg, Hive, RegKey, Security};
-use windows::core::{GUID, PCWSTR, PWSTR};
+use windows::core::{IUnknown, Interface, GUID, PCWSTR, PWSTR};
+use windows::Win32::Foundation::COLORREF;
+use windows::Win32::UI::WindowsAndMessaging::{CopyIcon, CopyImage, DestroyIcon, IMAGE_BITMAP, IMAGE_FLAGS};
 use windows::Win32::{
     System::{
         Com::{
@@ -10,12 +12,14 @@ use windows::Win32::{
         LibraryLoader::LoadLibraryW,
         Mmc::ISnapinAbout
     },
-    UI::WindowsAndMessaging::LoadStringW
+    UI::WindowsAndMessaging::{LoadStringW, HICON},
 };
+use windows::Win32::Graphics::Gdi::{self, DeleteObject, HBITMAP};
+
 
 use crate::nsi;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Default)]
 pub struct MMCSnapIn {
     pub clsid: String,
     pub about: Option<MMCSnapInAbout>,
@@ -30,11 +34,40 @@ pub struct MMCSnapIn {
     pub module_name: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Default)]
 pub struct MMCSnapInAbout {
     pub description: Option<String>,
     pub provider: Option<String>,
     pub version: Option<String>,
+    pub icon: Option<HICON>,
+    pub image: Option<MMCSnapInImage>,
+}
+
+impl Drop for MMCSnapInAbout {
+    fn drop(&mut self) {
+        if let Some(icon) = self.icon {
+            if !icon.is_invalid() {
+                let _ = unsafe { DestroyIcon(icon) };
+            }
+        }
+    }
+}
+#[derive(Clone, Default)]
+pub struct MMCSnapInImage {
+    pub small: HBITMAP,
+    pub small_open: HBITMAP,
+    pub large: HBITMAP,
+    pub mask: COLORREF,
+}
+
+impl Drop for MMCSnapInImage {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteObject(self.small);
+            let _ = DeleteObject(self.small_open);
+            let _ = DeleteObject(self.large);
+        }
+    }
 }
 
 trait ToWide {
@@ -185,42 +218,84 @@ impl TryFrom<GUID> for MMCSnapInAbout {
     fn try_from(value: GUID) -> Result<Self, Self::Error> {
         let mut snapin_about = MMCSnapInAbout::default();
         unsafe {
-            match CoCreateInstance::<_, ISnapinAbout>(&value, None, CLSCTX_INPROC_SERVER) {
-                Ok(about) => {
-                    let about_ref = about.clone();
-                    println!("Created instance for {:?}", value);
-                    // Get description
-                    println!("\tGetSnapinDescription()");
-                    let desc_ptr = about.GetSnapinDescription()?;
-                    let desc = desc_ptr.to_string()?;
-                    println!("\tGot {} at {:#x}, freeing", desc, desc_ptr.0 as usize);
-                    CoTaskMemFree(Some(desc_ptr.0 as *const _));
-                    snapin_about.description = Some(desc);
+            match CoCreateInstance::<_, IUnknown>(&value, None, CLSCTX_INPROC_SERVER) {
+                Ok(iunk) => {
+                    let about = iunk.cast::<ISnapinAbout>();
+                    if let Ok(about) = about {
+                        //println!("Created instance for {:?}", value);
+                        // Get description
+                        //println!("\tGetSnapinDescription()");
+                        let desc_ptr = about.GetSnapinDescription()?;
+                        if !desc_ptr.is_null() {
+                            let desc = desc_ptr.to_string()?;
+                            //println!("\tGot {} at {:#x}, freeing", desc, desc_ptr.0 as usize);
+                            CoTaskMemFree(Some(desc_ptr.0 as *const _));
+                            snapin_about.description = Some(desc);
+                        }
 
-                    // Get provider
-                    println!("\tGetProvider()");
-                    let prov_ptr = about.GetProvider()?;
-                    let prov = prov_ptr.to_string()?;
-                    println!("\tGot {} at {:#x}, freeing", prov, prov_ptr.0 as usize);
-                    CoTaskMemFree(Some(prov_ptr.0 as *const _));
-                    snapin_about.provider = Some(prov);
+                        // Get provider
+                        //println!("\tGetProvider()");
+                        let prov_ptr = about.GetProvider()?;
+                        if !prov_ptr.is_null() {
+                            let prov = prov_ptr.to_string()?;
+                            //println!("\tGot {} at {:#x}, freeing", prov, prov_ptr.0 as usize);
+                            CoTaskMemFree(Some(prov_ptr.0 as *const _));
+                            snapin_about.provider = Some(prov);
+                        }
 
-                    // Get version
+                        // Get version
+                        //println!("\tGetSnapinVersion()");
+                        let ver_ptr = about.GetSnapinVersion()?;
+                        if !ver_ptr.is_null() {
+                            //println!("\tGot {:?} from GetSnapinVersion()", ver_ptr);
+                            let ver = ver_ptr.to_string()?;
+                            //println!("\tGot {} at {:#x}, freeing", ver, ver_ptr.0 as usize);
+                            CoTaskMemFree(Some(ver_ptr.0 as *const _));
+                            snapin_about.version = Some(ver);
+                        }
 
-                    /*
-                    println!("\tGetSnapinVersion()");
-                    let ver_ptr = about.GetSnapinVersion()?;
-                    let ver = ver_ptr.to_string()?;
-                    println!("\tGot {} at {:#x}, freeing", ver, ver_ptr.0 as usize);
-                    CoTaskMemFree(Some(ver_ptr.0 as *const _));
-                    snapin_about.version = Some(ver);
-                    */
+                        // Get icon
+                        let icon_ptr = about.GetSnapinImage()?;
+                        if !icon_ptr.is_invalid() {
+                            let my_icon = CopyIcon(icon_ptr)?;
+                            snapin_about.icon = Some(my_icon);
+                        }
 
-                    // Ref counting?
-                    drop(about_ref);
+                        // Get images
 
-                    // Return filled struct
-                    Ok(snapin_about)
+                        let mut small = Gdi::HBITMAP(0);
+                        let mut small_open = Gdi::HBITMAP(0);
+                        let mut large = Gdi::HBITMAP(0);
+                        let mut cmask = windows::Win32::Foundation::COLORREF(0);
+                        match about.GetStaticFolderImage(
+                            &mut small, 
+                            &mut small_open, 
+                            &mut large, 
+                            &mut cmask
+                        ) {
+                            Ok(_) => {
+                                let image = MMCSnapInImage {
+                                    small: copy_bitmap(small),
+                                    small_open: copy_bitmap(small_open),
+                                    large: copy_bitmap(large),
+                                    mask: cmask.clone(),
+                                };
+
+                                snapin_about.image = Some(image);
+                            }
+                            Err(_) => {
+
+                            }
+                        }
+                        // Ref counting?
+                        //drop(about_ref);
+
+                        // Return filled struct
+                        Ok(snapin_about)
+                    }
+                    else {
+                        Err("ISnapInAbout not supported".into())
+                    }
                 }
                 Err(e) => Err(e.into())
             }
@@ -243,4 +318,10 @@ fn load_dll_string(dll_path: &str, str_id: i32) -> Result<String, Box<dyn Error>
         let string = String::from_utf16_lossy(&buffer[..length as usize]);
         Ok(string)
     }
+}
+
+fn copy_bitmap(src: HBITMAP) -> HBITMAP {
+    let src_h = windows::Win32::Foundation::HANDLE(src.0);
+    let dst_h = unsafe { CopyImage(src_h, IMAGE_BITMAP, 0, 0, IMAGE_FLAGS(0)).unwrap() };
+    HBITMAP(dst_h.0)
 }
