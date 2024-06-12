@@ -10,28 +10,14 @@ mod window;
 use snapin::MMCSnapIn;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    simple_logger::SimpleLogger::new().with_level(log::LevelFilter::max()).init().unwrap();
     let _ = unsafe { CoInitialize(None) };
 
     let snapins = get_snapins()?;
 
-    for snapin in snapins.iter() {
-        //println!("{:#?}\n", snapin);
-    }
-
     let standalone_snapins: Vec<MMCSnapIn> = snapins.into_iter().filter(|s| s.standalone).collect();
 
     let my = MyWindow::new(standalone_snapins);
-
-    /*
-    my.lv.items().add(
-        &[
-            "Hello"
-        ],
-        None,
-        (),
-    );
-    */
-
 
     if let Err(e) = my.wnd.run_main(None) {
         eprintln!("{}", e);

@@ -8,6 +8,8 @@ serde = "1.0"
 registry = "1.2.3"
 uuid = "1.8.0"
 winsafe = { version = "0.0.21", features = ["gui"] }
+log = "0.4"
+simple_logger = "5.0"
 
 [dependencies.windows]
 version = "0.56.0"
